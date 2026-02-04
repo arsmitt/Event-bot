@@ -17,14 +17,14 @@ def game_query(call):
 
 # --- Ключевое изменение для Bothost: Вебхук ---
 # Эта часть запускает веб-сервер, который слушает запросы от Telegram
-if name == 'main':
+if __name__ == '__main__':
     # Для локального тестирования можно оставить polling
     # bot.polling()
     # Но для деплоя на Bothost нужно использовать это:
     import flask
     from flask import request
     
-    app = flask.Flask(name)
+    app = flask.Flask(__name__)
     
     @app.route('/', methods=['POST'])
     def webhook():
