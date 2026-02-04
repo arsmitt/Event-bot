@@ -1,18 +1,18 @@
 import os
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.environ.get('BOT_TOKEN')
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Используйте /game для получения списка игр')
+    await update.message.reply_text('Используйте /game для открытия списка игр')
 
 async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Event3IR", callback_game='Event3IR')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('Доступные игры:', reply_markup=reply_markup)
+    # Отправляем игру напрямую
+    await context.bot.send_game(
+        chat_id=update.effective_chat.id,
+        game_short_name="Event3IR"
+    )
 
 def main():
     app = Application.builder().token(TOKEN).build()
