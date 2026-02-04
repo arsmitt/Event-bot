@@ -8,12 +8,12 @@ bot = telebot.TeleBot(TOKEN)
 # --- Обработчики команд (остаются прежними) ---
 @bot.message_handler(commands=['game'])
 def send_game(message):
-    bot.send_game(message.chat.id, "event3inarow")  # Убедись, что short_name точный!
+    bot.send_game(message.chat.id, "Event3IR")  # Убедись, что short_name точный!
 
-@bot.callback_query_handler(func=lambda call: call.game_short_name == "event3inarow")
+@bot.callback_query_handler(func=lambda call: call.game_short_name == "Event3IR")
 def game_query(call):
     # ВСТАВЬ СЮДА РЕАЛЬНЫЙ URL СВОЕЙ ИГРЫ!
-    bot.answer_callback_query(call.id, url="https://tvoi-hosting.ru/game/index.html")
+    bot.answer_callback_query(call.id, url="https://github.com/arsmitt/3-in-a-row/blob/main/index.html")
 
 # --- Ключевое изменение для Bothost: Вебхук ---
 # Эта часть запускает веб-сервер, который слушает запросы от Telegram
