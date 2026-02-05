@@ -1,8 +1,8 @@
 import os
 import logging
 import json
-from typing import Dict, Tuple, List
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, GameHighScore
+from typing import Dict, List
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,8 +19,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Хранилище рекордов
-user_scores: Dict[int, Dict[int, int]] = {}  # chat_id -> {user_id: score}
+# Хранилище рекордов для команд /top и /myrecord
+global_high_scores: Dict[int, Dict[str, any]] = {}  # user_id -> {name, best_score, games_played}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
@@ -29,7 +29,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Отправляем сообщение с игрой и кнопкой для открытия рекордов
     await update.message.reply_game(
         game_short_name=GAME_SHORT_NAME,
         reply_markup=reply_markup
@@ -54,35 +53,24 @@ async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_game(game_short_name=GAME_SHORT_NAME)
 
 async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает глобальную таблицу рекордов"""
-    if not user_scores:
+    """Показывает глобальную таблицу рекордов из памяти бота"""
+    if not global_high_scores:
         await update.message.reply_text("🏆 Рекордов пока нет! Будьте первым!")
         return
     
-    # Собираем лучшие результаты всех пользователей
-    all_scores = []
-    for chat_id in user_scores:
-        for user_id, score in user_scores[chat_id].items():
-            all_scores.append((user_id, score))
-    
-    # Группируем по user_id, берем лучший результат
-    user_best: Dict[int, int] = {}
-    for user_id, score in all_scores:
-        if user_id not in user_best or score > user_best[user_id]:
-            user_best[user_id] = score
-    
-    # Сортируем по убыванию
-    sorted_scores = sorted(user_best.items(), key=lambda x: x[1], reverse=True)[:10]
+    # Сортируем по лучшему счету
+    sorted_scores = sorted(
+        global_high_scores.items(),
+        key=lambda x: x[1]['best_score'],
+        reverse=True
+    )[:10]
     
     lines = ["🏆 <b>Глобальная таблица рекордов:</b>\n"]
-    for i, (user_id, score) in enumerate(sorted_scores, 1):
-        try:
-            user = await context.bot.get_chat(user_id)
-            name = user.username or user.first_name or f"Игрок {user_id}"
-        except:
-            name = f"Игрок {user_id}"
+    for i, (user_id, data) in enumerate(sorted_scores, 1):
+        name = data['name']
+        score = data['best_score']
         medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "🔸"))
-        lines.append(f"{medal} {i}. {name}: <b>{score}</b>")
+        lines.append(f"{medal} {i}. {name}: <b>{score}</b> (игр: {data['games_played']})")
     
     await update.message.reply_html("\n".join(lines))
 
@@ -90,18 +78,13 @@ async def myrecord_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Показывает лучший рекорд пользователя"""
     user_id = update.effective_user.id
     
-    # Ищем лучший результат во всех чатах
-    best_score = 0
-    for chat_id in user_scores:
-        if user_id in user_scores[chat_id]:
-            score = user_scores[chat_id][user_id]
-            if score > best_score:
-                best_score = score
-    
-    if best_score > 0:
+    if user_id in global_high_scores:
+        data = global_high_scores[user_id]
         await update.message.reply_html(
-            f"🎯 <b>Ваш лучший рекорд:</b> <code>{best_score}</code> очков\n\n"
-            f"Продолжайте в том же духе!"
+            f"🎯 <b>Ваша статистика:</b>\n\n"
+            f"Лучший рекорд: <b>{data['best_score']}</b>\n"
+            f"Всего игр: <b>{data['games_played']}</b>\n"
+            f"Имя: <b>{data['name']}</b>"
         )
     else:
         await update.message.reply_text("У вас пока нет сохраненных рекордов. Сыграйте в /game!")
@@ -116,62 +99,62 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     
     # 2. Обработка данных от игры (результат)
-    if query.data and query.data.startswith('game_result_'):
+    if query.data:
         try:
-            # Парсим данные из формата: game_result_{chat_id}_{message_id}_{user_id}_{score}
-            parts = query.data.split('_')
-            if len(parts) >= 6:
-                chat_id = int(parts[2])
-                message_id = int(parts[3])
-                user_id = int(parts[4])
-                score = int(parts[5])
+            # Пробуем распарсить JSON из игры
+            game_data = json.loads(query.data)
+            
+            if 'score' in game_data:
+                score = int(game_data['score'])
+                user = query.from_user
+                chat_id = query.message.chat.id
+                message_id = query.message.message_id
                 
-                # Сохраняем рекорд
-                if chat_id not in user_scores:
-                    user_scores[chat_id] = {}
-                user_scores[chat_id][user_id] = score
+                logger.info(f"Получен результат от {user.id}: {score} очков")
                 
-                # Сохраняем через Telegram API
+                # === СОХРАНЕНИЕ РЕКОРДА В TELEGRAM API ===
                 try:
+                    # Важно: используем force=True, чтобы всегда обновлять рекорд
                     await context.bot.set_game_score(
-                        user_id=user_id,
+                        user_id=user.id,
                         score=score,
                         chat_id=chat_id,
                         message_id=message_id,
-                        force=True
+                        force=True  # Разрешаем обновлять рекорд
                     )
-                    logger.info(f"Рекорд сохранен: пользователь {user_id}, счет {score}")
                     
-                    # Получаем и показываем таблицу рекордов
-                    try:
-                        high_scores = await context.bot.get_game_high_scores(
-                            user_id=user_id,
-                            chat_id=chat_id,
-                            message_id=message_id
-                        )
-                        
-                        if high_scores:
-                            lines = ["🏆 <b>Таблица рекордов:</b>\n"]
-                            for i, hs in enumerate(high_scores[:10], 1):
-                                try:
-                                    user = await context.bot.get_chat(hs.user.id)
-                                    name = user.username or user.first_name or f"Игрок {hs.user.id}"
-                                except:
-                                    name = f"Игрок {hs.user.id}"
-                                medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "🔸"))
-                                lines.append(f"{medal} {i}. {name}: <b>{hs.score}</b>")
-                            
-                            await query.message.reply_html("\n".join(lines))
-                    except Exception as e:
-                        logger.error(f"Ошибка получения таблицы рекордов: {e}")
-                        await query.answer(f"✅ Рекорд {score} сохранен!")
+                    # === СОХРАНЕНИЕ В ЛОКАЛЬНОМ ХРАНИЛИЩЕ ===
+                    user_id = user.id
+                    user_name = user.username or user.first_name or f"Игрок {user.id}"
+                    
+                    if user_id not in global_high_scores:
+                        global_high_scores[user_id] = {
+                            'name': user_name,
+                            'best_score': score,
+                            'games_played': 1
+                        }
+                    else:
+                        # Обновляем лучший результат, если текущий больше
+                        if score > global_high_scores[user_id]['best_score']:
+                            global_high_scores[user_id]['best_score'] = score
+                        global_high_scores[user_id]['games_played'] += 1
+                    
+                    logger.info(f"Рекорд сохранен: {user_name} - {score}")
+                    await query.answer(f"✅ Ваш результат {score} сохранен!")
+                    
                 except Exception as e:
                     logger.error(f"Ошибка set_game_score: {e}")
-                    await query.answer(f"⚠️ Рекорд {score} сохранен локально")
+                    await query.answer("⚠️ Рекорд не сохранен в таблицу Telegram")
+                
+                return
+                
+        except json.JSONDecodeError:
+            # Если не JSON, то это обычный callback_data
+            pass
         except Exception as e:
-            logger.error(f"Ошибка обработки результата: {e}")
-            await query.answer("❌ Ошибка сохранения рекорда")
-        return
+            logger.error(f"Ошибка обработки данных игры: {e}")
+            await query.answer("❌ Ошибка обработки результата")
+            return
     
     # 3. Обработка обычных кнопок
     await query.answer()
@@ -179,45 +162,62 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if query.data == "about":
         about_text = (
             "🎮 <b>3-In-A-Row Game Bot</b>\n\n"
-            "Классическая игра в стиле 'три в ряд' с поддержкой рекордов через Telegram Games API.\n\n"
-            "<b>Как играть:</b>\n"
-            "• Перемещайте фигуры, чтобы собрать 3+ одинаковых в ряд\n"
-            "• Каждая фигура приносит очки\n"
-            "• Используйте бонусы из магазина\n"
-            "• Сохраняйте рекорды и соревнуйтесь с друзьями!\n\n"
-            "<b>GitHub:</b> https://github.com/arsmitt/3-in-a-row"
+            "Классическая игра в стиле 'три в ряд' с автоматическим сохранением рекордов.\n\n"
+            "Рекорды сохраняются сразу после завершения игры.\n"
+            "Для просмотра таблицы рекордов нажмите кнопку ниже."
         )
         await query.message.reply_html(about_text)
     
     elif query.data == "highscores":
-        chat_id = query.message.chat.id
-        message_id = query.message.message_id
+        # Показать таблицу рекордов из памяти
+        await show_highscores(query.message, context)
+
+async def show_highscores(message, context):
+    """Показать таблицу рекордов"""
+    try:
+        # Пробуем получить встроенную таблицу рекордов Telegram
+        high_scores = await context.bot.get_game_high_scores(
+            user_id=message.from_user.id,
+            chat_id=message.chat.id,
+            message_id=message.message_id
+        )
         
-        try:
-            # Получаем таблицу рекордов через Telegram API
-            high_scores = await context.bot.get_game_high_scores(
-                user_id=query.from_user.id,
-                chat_id=chat_id,
-                message_id=message_id
-            )
+        if high_scores:
+            lines = ["🏆 <b>Таблица рекордов (встроенная):</b>\n"]
+            for i, hs in enumerate(high_scores[:10], 1):
+                try:
+                    user = await context.bot.get_chat(hs.user.id)
+                    name = user.username or user.first_name or f"Игрок {hs.user.id}"
+                except:
+                    name = f"Игрок {hs.user.id}"
+                medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "🔸"))
+                lines.append(f"{medal} {i}. {name}: <b>{hs.score}</b>")
             
-            if high_scores:
-                lines = ["🏆 <b>Таблица рекордов:</b>\n"]
-                for i, hs in enumerate(high_scores[:10], 1):
-                    try:
-                        user = await context.bot.get_chat(hs.user.id)
-                        name = user.username or user.first_name or f"Игрок {hs.user.id}"
-                    except:
-                        name = f"Игрок {hs.user.id}"
-                    medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "🔸"))
-                    lines.append(f"{medal} {i}. {name}: <b>{hs.score}</b>")
-                
-                await query.message.reply_html("\n".join(lines))
-            else:
-                await query.message.reply_text("🏆 Рекордов пока нет! Будьте первым!")
-        except Exception as e:
-            logger.error(f"Ошибка получения таблицы рекордов: {e}")
-            await query.message.reply_text("Таблица рекордов пока пуста. Сыграйте первым!")
+            await message.reply_html("\n".join(lines))
+            return
+            
+    except Exception as e:
+        logger.warning(f"Встроенная таблица пуста или недоступна: {e}")
+    
+    # Если встроенной таблицы нет, показываем нашу
+    if not global_high_scores:
+        await message.reply_text("🏆 Рекордов пока нет! Будьте первым!")
+        return
+    
+    sorted_scores = sorted(
+        global_high_scores.items(),
+        key=lambda x: x[1]['best_score'],
+        reverse=True
+    )[:10]
+    
+    lines = ["🏆 <b>Таблица рекордов (локальная):</b>\n"]
+    for i, (user_id, data) in enumerate(sorted_scores, 1):
+        name = data['name']
+        score = data['best_score']
+        medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "🔸"))
+        lines.append(f"{medal} {i}. {name}: <b>{score}</b>")
+    
+    await message.reply_html("\n".join(lines))
 
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
@@ -230,7 +230,7 @@ def main() -> None:
     
     application.add_handler(CallbackQueryHandler(callback_handler))
     
-    logger.info("Бот запущен с полной поддержкой рекордов!")
+    logger.info("Бот запущен с автоматическим сохранением рекордов!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
